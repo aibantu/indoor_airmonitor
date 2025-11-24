@@ -1,172 +1,194 @@
-// Display helpers: layout initialization and partial updates
-#ifndef DISPLAY_HELPER_H
-#define DISPLAY_HELPER_H
+// 优化版显示助手 - 位级更新，日期低频率更新
+#ifndef DISPLAY_OPTIMIZED_H
+#define DISPLAY_OPTIMIZED_H
 
 #include <Arduino.h>
 #include <ST7789_AVR.h>
 
-// Extern globals from main.cpp
 extern ST7789_AVR tft;
 extern uint8_t gFirstLineSize;
 extern uint8_t gOtherLineSize;
-extern int16_t yDateTop, yLineSep, yCo2Top, yTempTop, yHumTop;
-extern int16_t xCo2Digits, xTempDigits, xHumDigits;
-extern int16_t xCo2Unit; // 单位起始 X，用于只重绘数字区域
-extern int16_t co2DigitRegionW, tempDigitRegionW, humDigitRegionW;
-extern uint8_t firstH, otherH;
-extern String prevDate;
-extern uint32_t prevCo2;
-extern int prevTempScaled, prevHumScaled;
-extern int prevCo2Chars, prevTempChars, prevHumChars;
 extern bool layoutInited;
-extern String prevCo2Str, prevTempStr, prevHumStr;
 
-static inline void initLayout(const String &date) {
-  uint16_t screenH = tft.height();
-  firstH = 8 * gFirstLineSize;
-  otherH = 8 * gOtherLineSize;
-  uint16_t fixedLines = firstH + 3 * otherH + 2;
-  uint16_t segments = 5;
-  int16_t remain = (int16_t)screenH - fixedLines;
-  int16_t seg = remain / segments; if(seg<0) seg=0;
+// 显示状态记录
+struct DisplayState {
+  String date = "";
+  uint32_t co2 = 0;
+  float temp = 0;
+  float hum = 0;
+  String co2Str = "----";
+  String tempStr = "--.-";
+  String humStr = "--.-";
+  unsigned long lastDateUpdate = 0; // 上次日期更新时间
+};
 
-  tft.fillRect(0,0,tft.width(),screenH,BLACK);
-  // 日期
-  tft.setTextSize(gFirstLineSize); tft.setTextColor(WHITE);
-  uint16_t datePixelW = date.length()*6*gFirstLineSize;
-  int16_t dateX = (int16_t)(tft.width()-datePixelW)/2; if(dateX<0) dateX=0;
-  yDateTop = seg; tft.setCursor(dateX,yDateTop); tft.print(date); prevDate = date;
-  // 分隔线
-  yLineSep = yDateTop + firstH + seg/2; if(yLineSep+1>=screenH) yLineSep=screenH-3;
-  tft.drawFastHLine(0,yLineSep,tft.width(),GREY); tft.drawFastHLine(0,yLineSep+1,tft.width(),GREY);
 
-  // CO2 标签 + 数字 + 单位
-  tft.setTextSize(gOtherLineSize); tft.setTextColor(YELLOW);
-  yCo2Top = yLineSep + 2 + seg; tft.setCursor(6,yCo2Top); tft.print("CO2 : ");
-  xCo2Digits = tft.getCursorX();
-  // 预先计算字符宽与单位宽度，固定单位在屏幕右侧位置，数字在单位左侧区域右对齐
-  int charW = 6 * gOtherLineSize;
-  String co2Str = String(prevCo2==0xFFFFFFFF?450:prevCo2);
-  String unitStr = " ppm";
-  int unitW = unitStr.length() * charW;
-  int rightMargin = 6; // 距右边留白像素数
-  xCo2Unit = tft.width() - rightMargin - unitW;
-  if (xCo2Unit < xCo2Digits + charW) {
-    // 保护性处理，避免单位位置小于数字起始位置
-    xCo2Unit = xCo2Digits + charW;
+extern DisplayState displayState;
+extern int16_t yDate, yLine, yCo2, yTemp, yHum, xUnit;
+
+// 初始化布局（只绘制静态内容）
+static inline void initDisplayLayout(const String& date) {
+  if (layoutInited) return;
+  
+  uint16_t w = tft.width(), h = tft.height();
+  tft.fillScreen(BLACK);
+  // tft.fillRect(0,0,w,h,GREEN);
+  
+  // 计算布局
+  uint8_t titleH = 8 * gFirstLineSize;
+  uint8_t dataH = 8 * gOtherLineSize;
+  int16_t spacing = (h - (titleH + 3 * dataH + 2)) / 5;
+  
+  yDate = spacing;
+  yLine = yDate + titleH + spacing/2;
+  yCo2 = yLine + 2 + spacing;
+  yTemp = yCo2 + dataH + spacing;
+  yHum = yTemp + dataH + spacing;
+  xUnit = w - 7 * 6 * gOtherLineSize; // 单位固定位置,6个字符
+  
+  // 绘制静态标签和单位（只绘制一次）
+  tft.setTextSize(gFirstLineSize);
+  tft.setTextColor(WHITE);
+  int16_t dateX = (w - date.length() * 6 * gFirstLineSize) / 2;
+  tft.setCursor(dateX < 0 ? 0 : dateX, yDate);
+  tft.print(date);
+  displayState.date = date;
+  
+  // 分割线
+  tft.drawFastHLine(0, yLine, w, GREY);
+  tft.drawFastHLine(0, yLine+1, w, GREY);
+  
+  // 数据行标签和单位（静态，只绘制一次）
+  tft.setTextSize(gOtherLineSize);
+  
+  // CO2行
+  tft.setCursor(6, yCo2); 
+  tft.setTextColor(YELLOW); 
+  tft.print("CO2 : ");
+  int16_t co2InitX = xUnit - 4 * 6 * gOtherLineSize - 6 * 2; // 初始显示位置
+  tft.setCursor(co2InitX, yCo2);
+  tft.print("----"); // 初始显示"----"
+  tft.setCursor(xUnit, yCo2); 
+  tft.print("ppm");
+  
+  
+  // 温度行
+  tft.setCursor(6, yTemp); 
+  tft.setTextColor(CYAN); 
+  tft.print("Temp: ");
+  tft.setCursor(xUnit, yTemp);
+  int16_t tempInitX = xUnit - 4 * 6 * gOtherLineSize - 6 * 2; // 初始显示位置
+  tft.setCursor(tempInitX, yTemp);
+  tft.print("--.-"); // 初始显示"--.-"
+  // 温度度符号
+  for (int dy = 0; dy < 6; dy++) {
+    for (int dx = 0; dx < 6; dx++) {
+      int rx = dx-3, ry = dy-3;
+      if (rx*rx + ry*ry >= 3 && rx*rx + ry*ry <= 6) {
+        tft.drawPixel(xUnit+dx, yTemp+dy, CYAN);
+      }
+    }
   }
-  // 将数字区域宽度设置为单位起始位置与数字起始位置的差值
-  co2DigitRegionW = xCo2Unit - xCo2Digits;
-  // 右对齐数字并绘制初始值
-  int digitsW = co2Str.length() * charW;
-  int digitsX = xCo2Unit - digitsW;
-  if (digitsX < xCo2Digits) digitsX = xCo2Digits;
-  tft.setCursor(digitsX, yCo2Top); tft.print(co2Str);
-  prevCo2 = co2Str.toInt(); prevCo2Chars = co2Str.length(); prevCo2Str = co2Str;
-  // 绘制固定单位
-  tft.setCursor(xCo2Unit, yCo2Top); tft.print(unitStr);
-
-  // 温度
-  tft.setTextColor(CYAN);
-  yTempTop = yCo2Top + otherH + seg; tft.setCursor(6,yTempTop); tft.print("Temp: ");
-  xTempDigits = tft.getCursorX();
-  String tempStr = String(25.3f,1);
-  tft.print(tempStr); prevTempScaled = (int)(25.3f*10+0.5f); prevTempChars = tempStr.length(); prevTempStr = tempStr;
-  int charWTemp = 6 * gOtherLineSize;
-  int16_t degX = xTempDigits + prevTempChars * charWTemp + charWTemp;
-  for(int dy=0; dy<6; dy++){ for(int dx=0; dx<6; dx++){ int rx=dx-3, ry=dy-3; int r2=rx*rx+ry*ry; if(r2>=3 && r2<=6) tft.drawPixel(degX+dx,yTempTop+dy,CYAN);} }
-  tft.setCursor(degX+8,yTempTop); tft.print("C");
-  tempDigitRegionW = 5 * 6 * gOtherLineSize;
-
-  // 湿度
-  tft.setTextColor(MAGENTA);
-  yHumTop = yTempTop + otherH + seg; tft.setCursor(6,yHumTop); tft.print("Humi: ");
-  xHumDigits = tft.getCursorX();
-  String humStr = String(48.5f,1);
-  tft.print(humStr); prevHumScaled = (int)(48.5f*10+0.5f); prevHumChars = humStr.length(); prevHumStr = humStr;
-  tft.print(" %");
-  humDigitRegionW = 5 * 6 * gOtherLineSize;
-
+  tft.setCursor(xUnit+8, yTemp); 
+  tft.print("C");
+  
+  // 湿度行
+  tft.setCursor(6, yHum); 
+  tft.setTextColor(MAGENTA); 
+  tft.print("Humi: ");
+  int16_t humInitX = xUnit - 4 * 6 * gOtherLineSize - 6 * 2; // 初始显示位置
+  tft.setCursor(humInitX, yHum);
+  tft.print("--.-"); // 初始显示"--.-"
+  tft.setCursor(xUnit, yHum); 
+  tft.print("%");
+  
   layoutInited = true;
 }
 
-static inline void updateValues(uint32_t co2, float tempC, float humPct) {
-  if(!layoutInited) return;
-  int tempScaled = (int)(tempC*10+0.5f);
-  int humScaled  = (int)(humPct*10+0.5f);
-  int charW = 6 * gOtherLineSize;
-  // 强制整行重绘 CO2（调试阶段，排除差分逻辑导致不更新）
-  {
-    String newStr = String(co2);
-    int newLen = newStr.length();
-    int charW = 6 * gOtherLineSize;
-    // 仅清除数字区域（从数字起始到单位起始），避免擦掉静态单位。
-    // 数字采用右对齐：数字起始 X = xCo2Unit - requiredDigitsW
-    int requiredDigitsW = newLen * charW;
-    int digitsX = xCo2Unit - requiredDigitsW;
-    if (digitsX < xCo2Digits) digitsX = xCo2Digits;
-    // 为避免残留，清除整个数字区域（保证覆盖之前更长的数字）
-    tft.fillRect(xCo2Digits-1, yCo2Top, co2DigitRegionW+2, otherH, BLACK);
-    tft.setTextSize(gOtherLineSize); tft.setTextColor(YELLOW); tft.setCursor(digitsX,yCo2Top);
+// 更新单个字符（位级更新）
+static inline void updateChar(int16_t x, int16_t y, uint16_t color, char oldChar, char newChar, uint8_t textSize = 1) {
+  if (oldChar != newChar) {
+    int charW = 6 * textSize;
+    int charH = 8 * textSize;
+    tft.fillRect(x, y, charW, charH, BLACK);
+    tft.setTextColor(color);
+    tft.setCursor(x, y);
+    tft.print(newChar);
+  }
+}
+
+// 更新数值显示（位级更新）
+static inline void updateValue(int16_t x, int16_t y, uint16_t color, const String& oldStr, const String& newStr, uint8_t textSize) {
+  int charW = 6 * textSize;
+  int charH = 8 * textSize;
+  // int maxChars = 6; // 最大字符数
+  
+  if (oldStr.length() != newStr.length()) {
+    // 长度变化，整块更新
+    int maxChars = max(oldStr.length(), newStr.length())  * charW;
+    tft.fillRect(xUnit - maxChars - 6 * 2, y, maxChars, charH, BLACK);
+    tft.setTextColor(color);
+    tft.setCursor(x, y);
     tft.print(newStr);
-    prevCo2 = co2; prevCo2Chars = newLen; prevCo2Str = newStr;
-    // 如果数字溢出分配区域，重绘单位以确保可见性
-    if (requiredDigitsW > co2DigitRegionW) {
-      tft.setTextSize(gOtherLineSize); tft.setTextColor(YELLOW); tft.setCursor(xCo2Unit, yCo2Top);
-      tft.print(" ppm");
-    }
-  }
-  if(tempScaled != prevTempScaled){
-    String newStr = String(tempC,1);
-    int newLen = newStr.length();
-    if(newLen != prevTempChars){
-      tft.fillRect(xTempDigits, yTempTop, tempDigitRegionW, otherH, BLACK);
-      tft.setTextSize(gOtherLineSize); tft.setTextColor(CYAN); tft.setCursor(xTempDigits,yTempTop); tft.print(newStr);
-    } else {
-      for(int i=0;i<newLen;i++){
-        if(newStr[i] != prevTempStr[i]){
-          int16_t dx = xTempDigits + i*charW;
-          tft.fillRect(dx, yTempTop, charW, otherH, BLACK);
-          tft.setTextSize(gOtherLineSize); tft.setTextColor(CYAN); tft.setCursor(dx,yTempTop); tft.print(newStr[i]);
-        }
+  } else {
+    // 长度相同，逐字符更新
+    for (int i = 0; i < newStr.length(); i++) {
+      if (oldStr[i] != newStr[i]) {
+        updateChar(x + i * charW, y, color, oldStr[i], newStr[i], textSize);
       }
     }
-    int16_t digitsEndX = xTempDigits + prevTempChars * charW;
-    tft.fillRect(digitsEndX, yTempTop, charW*2, otherH, BLACK);
-    int16_t newDegX = xTempDigits + newLen * charW + charW;
-    for(int dy=0; dy<6; dy++){ for(int dx=0; dx<6; dx++){ int rx=dx-3, ry=dy-3; int r2=rx*rx+ry*ry; if(r2>=3 && r2<=6) tft.drawPixel(newDegX+dx,yTempTop+dy,CYAN);} }
-    tft.setTextSize(gOtherLineSize); tft.setTextColor(CYAN); tft.setCursor(newDegX+8,yTempTop); tft.print("C");
-    prevTempScaled = tempScaled; prevTempChars = newLen; prevTempStr = newStr;
-  }
-  if(humScaled != prevHumScaled){
-    String newStr = String(humPct,1);
-    int newLen = newStr.length();
-    if(newLen != prevHumChars){
-      tft.fillRect(xHumDigits, yHumTop, humDigitRegionW, otherH, BLACK);
-      tft.setTextSize(gOtherLineSize); tft.setTextColor(MAGENTA); tft.setCursor(xHumDigits,yHumTop); tft.print(newStr);
-    } else {
-      for(int i=0;i<newLen;i++){
-        if(newStr[i] != prevHumStr[i]){
-          int16_t dx = xHumDigits + i*charW;
-          tft.fillRect(dx, yHumTop, charW, otherH, BLACK);
-          tft.setTextSize(gOtherLineSize); tft.setTextColor(MAGENTA); tft.setCursor(dx,yHumTop); tft.print(newStr[i]);
-        }
-      }
-    }
-    prevHumScaled = humScaled; prevHumChars = newLen; prevHumStr = newStr;
   }
 }
 
-static inline void updateDateIfNeeded(const String &date){
-  if(!layoutInited) return;
-  if(date != prevDate){
-    uint16_t datePixelW = date.length()*6*gFirstLineSize;
-    tft.fillRect(0,yDateTop,tft.width(),firstH,BLACK);
-    int16_t dateX = (int16_t)(tft.width()-datePixelW)/2; if(dateX<0) dateX=0;
-    tft.setTextSize(gFirstLineSize); tft.setTextColor(WHITE); tft.setCursor(dateX,yDateTop); tft.print(date);
-    tft.drawFastHLine(0,yLineSep,tft.width(),GREY); tft.drawFastHLine(0,yLineSep+1,tft.width(),GREY);
-    prevDate = date;
+// 主更新函数 - 日期每1小时更新一次，其他数值位级更新
+static inline void updateDisplay(const String& date, uint32_t co2, float temp, float hum) {
+  if (!layoutInited) initDisplayLayout(date);
+  
+  int charW = 6 * gOtherLineSize;
+  unsigned long currentTime = millis();
+  
+  // 1. 更新日期（每1小时检查一次，位级更新）
+  if (date != displayState.date && (currentTime - displayState.lastDateUpdate >= 3600000)) {
+    int16_t dateX = (tft.width() - date.length() * 6 * gFirstLineSize) / 2;
+    int16_t oldDateX = (tft.width() - displayState.date.length() * 6 * gFirstLineSize) / 2;    
+    updateValue(dateX, yDate, WHITE, displayState.date, date, gFirstLineSize);
+    
+    displayState.date = date;
+    displayState.lastDateUpdate = currentTime;
+  }
+  
+  // 2. 更新CO2（数值右对齐，位级更新）
+  if (co2 != displayState.co2 ) {
+    String newCo2 = String(co2);
+    int digitsW = newCo2.length() * charW;
+    int co2X = xUnit - digitsW - 6 * 2;
+    
+    updateValue(co2X, yCo2, YELLOW, displayState.co2Str, newCo2, gOtherLineSize);
+    displayState.co2 = co2;
+    displayState.co2Str = newCo2;
+  }
+  
+  // 3. 更新温度（位级更新）
+  if (temp != displayState.temp) {
+    String newTemp = String(temp, 1);
+    int digitsW = newTemp.length() * charW;
+    int tempX = xUnit - digitsW - 6 * 2;
+    
+    updateValue(tempX, yTemp, CYAN, displayState.tempStr, newTemp, gOtherLineSize);
+    displayState.temp = temp;
+    displayState.tempStr = newTemp;
+  }
+  
+  // 4. 更新湿度（位级更新）
+  if (hum != displayState.hum) {
+    String newHum = String(hum, 1);
+    int digitsW = newHum.length() * charW;
+    int humX = xUnit - digitsW - 6 * 2;
+    
+    updateValue(humX, yHum, MAGENTA, displayState.humStr, newHum, gOtherLineSize);
+    displayState.hum = hum;
+    displayState.humStr = newHum;
   }
 }
 
-#endif // DISPLAY_HELPER_H
+#endif // DISPLAY_OPTIMIZED_H
